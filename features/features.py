@@ -1,144 +1,166 @@
-"""Feature engineering for short-horizon mid-price prediction.
+"""Feature construction for short-horizon mid-price movement prediction.
 
-All features are known strictly at the event they describe (no lookahead).
-Labels are future mid moves; the frame keeps them for training but the
-execution engine only ever reads features at the current event.
+Features (per market event, book-time index):
+  qi           queue imbalance at top of book  (Qb-Qa)/(Qb+qa)
+  micro_dev    microprice deviation from mid, in ticks
+  ofi          Cont-Kukanov-Stoikov (2013) order-flow imbalance, window sum,
+               normalized by mean top-of-book depth
+  trade_flow   signed traded volume / total volume over window
+               (+ = buyer-initiated aggressors)
+  trade_ci     signed trade count imbalance over window
+  rv           realized volatility: rolling std of mid log changes (ticks)
+  spread_ticks bid-ask spread in ticks
+
+Labels for horizons h in {1,5,20}:
+  y_h          (mid_{i+h} - mid_i) / tick           (continuous)
+  c_h in {-1,0,1} direction, deadband LABEL_DEADBAND_TICKS
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import deque
 
 import numpy as np
 import pandas as pd
 
 import config
 from core.orderbook import OrderBook
-from core.types import DepthEvent, Side, Trade
+from data.loader import build_market_events, load_jsonl
 
 FEATURE_COLS = ["qi", "micro_dev", "ofi", "trade_flow", "trade_ci", "rv",
                 "spread_ticks"]
 
 
-@dataclass
 class FeatureStore:
-    df: pd.DataFrame
+    def __init__(self, df: pd.DataFrame, tick: float, window: int):
+        self.df = df.reset_index(drop=True)
+        self.tick = tick
+        self.window = window
 
     def features_at(self, seq: int) -> pd.Series:
         seq = min(max(seq, 0), len(self.df) - 1)
-        return self.df.loc[seq, FEATURE_COLS].astype(float)
+        return self.df.loc[seq, FEATURE_COLS].fillna(0.0)
+
+    def mid_at(self, seq: int) -> float:
+        seq = min(max(seq, 0), len(self.df) - 1)
+        return float(self.df.loc[seq, "mid"])
 
 
-def build_features(raw_path: str | None = None,
-                   snapshot: dict | None = None,
-                   depths: list | None = None,
-                   trades: list | None = None) -> FeatureStore:
-    if raw_path is not None:
-        from data.loader import load_jsonl
-        snapshot, depths, trades = load_jsonl(raw_path)
-    depths = depths or []
-    trades = trades or []
+def build_features(path: str | None = None,
+                   snapshot=None, depths=None, trades=None,
+                   window: int = config.FEATURE_WINDOW,
+                   tick: float = config.TICK_SIZE,
+                   max_levels: int = config.N_BOOK_LEVELS) -> FeatureStore:
+    if path is not None:
+        snapshot, depths, trades = load_jsonl(path)
+    events = build_market_events(depths, trades)
 
-    ob = OrderBook(max_levels=config.N_BOOK_LEVELS)
-    if snapshot:
-        ob.apply_snapshot(snapshot["lastUpdateId"], snapshot["bids"],
-                          snapshot["asks"])
+    book = OrderBook(max_levels=max_levels)
+    if snapshot is not None:
+        book.apply_snapshot(snapshot["lastUpdateId"],
+                            snapshot["bids"], snapshot["asks"])
 
-    # index trades/depths by timestamp; walk in exchange-time order with trades
-    # at the same timestamp applied first.
-    items: list[tuple[int, int, object]] = []
-    for d in depths:
-        items.append((d.ts, 1, d))
-    for t in trades:
-        items.append((t.ts, 0, t))
-    items.sort(key=lambda x: (x[0], x[1]))
+    n = len(events)
+    ts = np.zeros(n, dtype=np.int64)
+    mids = np.full(n, np.nan)
+    pb = np.full(n, np.nan)
+    pa = np.full(n, np.nan)
+    qb = np.full(n, np.nan)
+    qa = np.full(n, np.nan)
+    ofi_step = np.zeros(n)
+    signed_vol = np.zeros(n)
+    signed_cnt = np.zeros(n)
+    total_vol = np.zeros(n)
+    total_cnt = np.zeros(n)
 
-    W = config.FEATURE_WINDOW
-    rows: list[dict] = []
-    prev_bb = prev_ba = None
-    ofi_terms: list[float] = []
-    trade_signed: list[float] = []
-    trade_signs: list[int] = []
-    mid_hist: list[float] = []
+    prev = None  # (pb, pa, qb, qa)
 
-    def _depth_terms(ev: DepthEvent):
-        nonlocal prev_bb, prev_ba
-        terms = []
-        # bid side contribution
-        for p, q in ev.bids:
-            p, q = float(p), float(q)
-            q_prev = ob.qty_at("bid", p)
-            if prev_bb is not None and p >= prev_bb:
-                terms.append(q - q_prev)
-        if prev_bb is not None and ob.best_bid is not None and ob.best_bid < prev_bb:
-            terms.append(-ob.qty_at("bid", prev_bb))
-        for p, q in ev.asks:
-            p, q = float(p), float(q)
-            q_prev = ob.qty_at("ask", p)
-            if prev_ba is not None and p <= prev_ba:
-                terms.append(-(q - q_prev))
-        if prev_ba is not None and ob.best_ask is not None and ob.best_ask > prev_ba:
-            terms.append(-ob.qty_at("ask", prev_ba))
-        prev_bb, prev_ba = ob.best_bid, ob.best_ask
-        return terms
-
-    for seq, (ts, _, obj) in enumerate(items):
-        if isinstance(obj, DepthEvent):
-            terms = _depth_terms(obj)
-            ob.apply_levels(obj.bids, obj.asks)
-            ofi_terms.append(float(np.sum(terms)) if terms else 0.0)
-        else:
-            tr: Trade = obj
+    for ev in events:
+        i = ev.seq
+        ts[i] = ev.ts
+        if ev.depth is not None:
+            book.apply_levels(ev.depth.bids, ev.depth.asks)
+        if ev.trade is not None:
+            tr = ev.trade
             sgn = tr.aggressor_side.sign
-            trade_signed.append(sgn * tr.qty)
-            trade_signs.append(sgn)
-            ofi_terms.append(0.0)
+            signed_vol[i] += sgn * tr.qty
+            signed_cnt[i] += sgn
+            total_vol[i] += tr.qty
+            total_cnt[i] += 1
 
-        mid = ob.mid
-        if mid is not None:
-            mid_hist.append(mid)
-
-        bb, ba = ob.best_bid, ob.best_ask
-        if bb is None or ba is None:
+        b_bid, b_ask = book.best_bid, book.best_ask
+        if b_bid is None or b_ask is None:
+            if prev is not None:
+                pb[i], pa[i], qb[i], qa[i] = prev
             continue
-        qb, qa = ob.bids[bb], ob.asks[ba]
-        qi = (qb - qa) / (qb + qa) if qb + qa > 0 else 0.0
-        micro = ob.microprice()
-        micro_dev = (micro - mid) / config.TICK_SIZE if micro else 0.0
-        spread_t = (ba - bb) / config.TICK_SIZE
+        cur = (b_bid, b_ask, book.bids[b_bid], book.asks[b_ask])
+        pb[i], pa[i], qb[i], qa[i] = cur
+        mids[i] = (b_bid + b_ask) / 2.0
 
-        depth_ref = max((qb + qa) / 2.0, 1e-9)
-        ofi = float(np.sum(ofi_terms[-W:])) / depth_ref
-        tflow = float(np.sum(trade_signed[-W:]))
-        if len(trade_signs) >= 2:
-            seg = trade_signs[-(W + 1):]
-            same = sum(1 for i in range(1, len(seg)) if seg[i] == seg[i - 1])
-            tci = (2 * same / (len(seg) - 1)) - 1
-        else:
-            tci = 0.0
-        if len(mid_hist) >= W + 1:
-            rets = np.diff(mid_hist[-(W + 1):]) / config.TICK_SIZE
-            rv = float(np.std(rets))
-        else:
-            rv = 0.0
+        if prev is not None and ev.depth is not None:
+            ofi_step[i] = _ofi_contribution(prev, cur)
+        prev = cur
 
-        rows.append({
-            "seq": seq, "ts": ts, "mid": mid, "best_bid": bb, "best_ask": ba,
-            "qi": qi, "micro_dev": micro_dev, "ofi": ofi,
-            "trade_flow": tflow, "trade_ci": tci, "rv": rv,
-            "spread_ticks": spread_t,
-        })
+    # forward-fill book state across events that didn't touch the top
+    frame = pd.DataFrame({
+        "ts": ts, "mid": mids, "pb": pb, "pa": pa, "qb": qb, "qa": qa,
+        "ofi_step": ofi_step, "signed_vol": signed_vol, "signed_cnt": signed_cnt,
+        "total_vol": total_vol, "total_cnt": total_cnt,
+    })
+    for c in ("mid", "pb", "pa", "qb", "qa"):
+        frame[c] = frame[c].ffill()
 
-    df = pd.DataFrame(rows)
-    # labels: future signed mid move in ticks + direction class
-    tick = config.TICK_SIZE
-    db = config.LABEL_DEADBAND_TICKS
+    g = frame
+    g["qi"] = (g.qb - g.qa) / (g.qb + g.qa)
+    g["microprice"] = (g.pb * g.qa + g.pa * g.qb) / (g.qb + g.qa)
+    g["micro_dev"] = (g.microprice - g.mid) / tick
+    g["spread_ticks"] = (g.pa - g.pb) / tick
+
+    roll_depth = (g.qb + g.qa).rolling(window, min_periods=2).mean()
+    g["ofi"] = g.ofi_step.rolling(window, min_periods=2).sum() / roll_depth
+
+    tv = g.total_vol.rolling(window, min_periods=1).sum()
+    sv = g.signed_vol.rolling(window, min_periods=1).sum()
+    g["trade_flow"] = sv / tv.replace(0, np.nan)
+    tc = g.total_cnt.rolling(window, min_periods=1).sum()
+    sc = g.signed_cnt.rolling(window, min_periods=1).sum()
+    g["trade_ci"] = sc / tc.replace(0, np.nan)
+
+    log_ret = np.log(g.mid).diff()
+    g["rv"] = log_ret.rolling(window, min_periods=5).std() / np.log(1 + tick / g.mid)
+
+    g = g.fillna(0.0)
+
+    # labels
     for h in config.HORIZONS:
-        fwd = df["mid"].shift(-h)
-        move = (fwd - df["mid"]) / tick
-        df[f"y{h}"] = move
-        df[f"c{h}"] = np.where(move > db, 1, np.where(move < -db, -1, 0))
-    return FeatureStore(df)
+        fut = g.mid.shift(-h)
+        delta = (fut - g.mid) / tick
+        g[f"y{h}"] = delta
+        g[f"c{h}"] = np.where(delta > config.LABEL_DEADBAND_TICKS, 1,
+                              np.where(delta < -config.LABEL_DEADBAND_TICKS, -1, 0))
+
+    keep = ["ts", "mid", "pb", "pa", "qb", "qa"] + FEATURE_COLS + \
+           [f"y{h}" for h in config.HORIZONS] + [f"c{h}" for h in config.HORIZONS]
+    return FeatureStore(g[keep], tick, window)
 
 
-def save_feature_summary(store: FeatureStore, out_path: str) -> None:
-    store.df.to_csv(out_path, index=False)
+def _ofi_contribution(prev, cur) -> float:
+    pb0, pa0, qb0, qa0 = prev
+    pb1, pa1, qb1, qa1 = cur
+    if pb1 > pb0:
+        e_b = qb1
+    elif pb1 < pb0:
+        e_b = -qb0
+    else:
+        e_b = qb1 - qb0
+
+    if pa1 > pa0:
+        e_a = -qa0
+    elif pa1 < pa0:
+        e_a = qa1
+    else:
+        e_a = qa0 - qa1
+    return e_b + e_a
+
+
+def save_feature_summary(store: FeatureStore, out_csv: str) -> None:
+    store.df.to_csv(out_csv, index=False)

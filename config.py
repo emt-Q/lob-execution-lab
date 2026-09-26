@@ -16,7 +16,7 @@ RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
 RESULTS_DIR = ROOT / "results"
 REPORTS_DIR = ROOT / "reports"
-FIGURES_DIR = REPORTS_DIR / "figures"
+FIGURES_DIR = REPORTS / "figures"
 for d in (RAW_DIR, PROCESSED_DIR, RESULTS_DIR, FIGURES_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
@@ -89,9 +89,9 @@ class BacktestConfig:
     latencies_ms: tuple = LATENCIES_MS
     n_parent_orders: int = N_PARENT_ORDERS
     parent_qty: float = PARENT_QTY
-    parent_horizon_events: float = PARENT_HORIZON_EVENTS
+    parent_horizon_events: int = PARENT_HORIZON_EVENTS
     child_qty: float = CHILD_QTY
-    limit_timeout_events: float = LIMIT_TIMEOUT_EVENTS
-    n_book_levels: float = N_BOOK_LEVELS
+    limit_timeout_events: int = LIMIT_TIMEOUT_EVENTS
+    n_book_levels: int = N_BOOK_LEVELS
     seed: int = RANDOM_SEED
     extra: dict = field(default_factory=dict)
