@@ -1,5 +1,4 @@
 dimension,bucket,strategy_cmp,advantage_bps,n
-dimension,bucket,strategy_cmp,advantage_bps,n
 spread_bin,1 tick,adaptive_signal,0.009763684436621487,182
 spread_bin,2 ticks,adaptive_signal,0.00901968582979124,18
 spread_bin,1 tick,improve_one_tick,0.007983150059892469,182
