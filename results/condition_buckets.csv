@@ -1,0 +1,35 @@
+dimension,bucket,strategy_cmp,advantage_bps,n
+dimension,bucket,strategy_cmp,advantage_bps,n
+spread_bin,1 tick,adaptive_signal,0.009763684436621487,182
+spread_bin,2 ticks,adaptive_signal,0.00901968582979124,18
+spread_bin,1 tick,improve_one_tick,0.007983150059892469,182
+spread_bin,2 ticks,improve_one_tick,0.011907467712028054,18
+spread_bin,1 tick,join_best,0.003859200569555734,182
+spread_bin,2 ticks,join_best,0.002265252831909845,18
+qi_b_bin,low,adaptive_signal,0.006680159998490074,66
+qi_b_bin,mid,adaptive_signal,0.009163468606658814,67
+qi_b_bin,high,adaptive_signal,0.013201521729177124,67
+qi_b_bin,low,improve_one_tick,0.007714602142695534,67
+qi_b_bin,mid,improve_one_tick,0.008065440149797149,66
+qi_b_bin,high,improve_one_tick,0.009224930392085398,67
+qi_b_bin,low,join_best,-0.003906287043242942,67
+qi_b_bin,mid,join_best,0.0033558987079565124,67
+qi_b_bin,high,join_best,0.01181856171360169,66
+rv_b_bin,low,adaptive_signal,0.0017976184316486348,66
+rv_b_bin,mid,adaptive_signal,0.009429776148638616,67
+rv_b_bin,high,adaptive_signal,0.017744881999309788,67
+rv_b_bin,low,improve_one_tick,0.0032012529410135596,67
+rv_b_bin,mid,improve_one_tick,0.008254820349204252,66
+rv_b_bin,high,improve_one_tick,0.013551726004100675,67
+rv_b_bin,low,join_best,-0.00128412198303496,67
+rv_b_bin,mid,join_best,0.006746351503101597,67
+rv_b_bin,high,join_best,0.005714843587712971,66
+ofi_b_bin,low,adaptive_signal,0.016755134437973242,66
+ofi_b_bin,mid,adaptive_signal,0.006297261486386308,67
+ofi_b_bin,high,adaptive_signal,0.0061431272438045685,67
+ofi_b_bin,low,improve_one_tick,0.011839323654461395,67
+ofi_b_bin,mid,improve_one_tick,0.0049969053459251005,66
+ofi_b_bin,high,improve_one_tick,0.008122944657268124,67
+ofi_b_bin,low,join_best,0.002191777247139806,67
+ofi_b_bin,mid,join_best,0.001783202426288458,67
+ofi_b_bin,high,join_best,0.007224627522936775,66
